@@ -1,0 +1,3 @@
+node_modules/
+# Vite build output
+dist/
