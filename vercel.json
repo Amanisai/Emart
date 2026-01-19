@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://emart-20ze.onrender.com/api/:path*"
+    }
+  ]
+}
