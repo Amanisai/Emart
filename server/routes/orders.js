@@ -1,11 +1,8 @@
 import express from "express";
 import { z } from "zod";
-import { db, nowIso } from "../db.js";
+import { pool, nowIso } from "../db.js";
 
 export const ordersRouter = express.Router();
-
-// Guest user ID for unauthenticated orders
-const GUEST_USER_ID = 1;
 
 function toMoney(priceCents) {
   return (Number(priceCents || 0) / 100).toFixed(2);
@@ -23,83 +20,87 @@ const createOrderSchema = z.object({
     .min(1),
 });
 
-ordersRouter.get("/", (req, res) => {
-  const rows = db.prepare("SELECT * FROM orders ORDER BY id DESC").all();
+ordersRouter.get("/", async (req, res) => {
+  try {
+    const result = await pool.query("SELECT * FROM orders ORDER BY id DESC");
 
-  const list = rows.map((o) => ({
-    id: String(o.id),
-    total: toMoney(o.total_cents),
-    status: o.status,
-    createdAt: o.created_at,
-    address: o.address_json ? JSON.parse(o.address_json) : null,
-    items: o.items_json ? JSON.parse(o.items_json) : [],
-  }));
+    const list = result.rows.map((o) => ({
+      id: String(o.id),
+      total: toMoney(o.total_cents),
+      status: o.status,
+      createdAt: o.created_at,
+      address: o.address_json ? JSON.parse(o.address_json) : null,
+      items: o.items_json ? JSON.parse(o.items_json) : [],
+    }));
 
-  return res.json(list);
+    return res.json(list);
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "Database error" });
+  }
 });
 
 // Admin: list all orders
-ordersRouter.get("/admin", (_req, res) => {
-  const rows = db
-    .prepare(
-      "SELECT o.id, o.total_cents, o.status, o.payment_provider, o.payment_status, o.payment_ref, o.created_at, u.id as user_id, u.email as user_email, u.name as user_name FROM orders o JOIN users u ON u.id = o.user_id ORDER BY o.id DESC"
-    )
-    .all();
-
-  return res.json(
-    rows.map((o) => ({
-      id: String(o.id),
-      user: { id: String(o.user_id), email: o.user_email, name: o.user_name },
-      total: toMoney(o.total_cents),
-      status: o.status,
-      paymentStatus: o.payment_status || null,
-      paymentProvider: o.payment_provider || null,
-      paymentRef: o.payment_ref || null,
-      createdAt: o.created_at,
-    }))
-  );
-});
-
-ordersRouter.post("/", (req, res) => {
-  const parsed = createOrderSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: "Invalid input" });
-
-  const userId = GUEST_USER_ID;
-
-  // Compute totals from products table for integrity.
-  const items = parsed.data.items;
-  let totalCents = 0;
-
-  const getProduct = db.prepare("SELECT key, price_cents, title, image, type FROM products WHERE key = ?");
-
-  const expanded = items.map((it) => {
-    const product = getProduct.get(it.key);
-    if (!product) throw new Error(`Unknown product: ${it.key}`);
-    const lineTotal = Number(product.price_cents) * it.quantity;
-    totalCents += lineTotal;
-    return {
-      key: product.key,
-      type: product.type,
-      title: product.title,
-      image: product.image,
-      price: toMoney(product.price_cents),
-      quantity: it.quantity,
-      lineTotal: toMoney(lineTotal),
-    };
-  });
-
-  const info = db
-    .prepare(
-      "INSERT INTO orders (user_id, total_cents, status, address_json, items_json, created_at) VALUES (?, ?, ?, ?, ?, ?)"
-    )
-    .run(
-      userId,
-      totalCents,
-      "created",
-      parsed.data.address ? JSON.stringify(parsed.data.address) : null,
-      JSON.stringify(expanded),
-      nowIso()
+ordersRouter.get("/admin", async (_req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT id, total_cents, status, payment_provider, payment_status, payment_ref, created_at FROM orders ORDER BY id DESC"
     );
 
-  return res.json({ id: String(info.lastInsertRowid), total: toMoney(totalCents), status: "created" });
+    return res.json(
+      result.rows.map((o) => ({
+        id: String(o.id),
+        total: toMoney(o.total_cents),
+        status: o.status,
+        paymentStatus: o.payment_status || null,
+        paymentProvider: o.payment_provider || null,
+        paymentRef: o.payment_ref || null,
+        createdAt: o.created_at,
+      }))
+    );
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "Database error" });
+  }
+});
+
+ordersRouter.post("/", async (req, res) => {
+  try {
+    const parsed = createOrderSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: "Invalid input" });
+
+    // Compute totals from products table for integrity.
+    const items = parsed.data.items;
+    let totalCents = 0;
+
+    const expanded = [];
+    for (const it of items) {
+      const result = await pool.query("SELECT key, price_cents, title, image, type FROM products WHERE key = $1", [it.key]);
+      if (result.rows.length === 0) {
+        return res.status(400).json({ error: `Unknown product: ${it.key}` });
+      }
+      const product = result.rows[0];
+      const lineTotal = Number(product.price_cents) * it.quantity;
+      totalCents += lineTotal;
+      expanded.push({
+        key: product.key,
+        type: product.type,
+        title: product.title,
+        image: product.image,
+        price: toMoney(product.price_cents),
+        quantity: it.quantity,
+        lineTotal: toMoney(lineTotal),
+      });
+    }
+
+    const result = await pool.query(
+      "INSERT INTO orders (total_cents, status, address_json, items_json, created_at) VALUES ($1, $2, $3, $4, $5) RETURNING id",
+      [totalCents, "created", parsed.data.address ? JSON.stringify(parsed.data.address) : null, JSON.stringify(expanded), nowIso()]
+    );
+
+    return res.json({ id: String(result.rows[0].id), total: toMoney(totalCents), status: "created" });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "Database error" });
+  }
 });

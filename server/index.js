@@ -2,8 +2,8 @@ import express from "express";
 import cors from "cors";
 
 import { config } from "./config.js";
+import { initDb } from "./db.js";
 import { seedIfNeeded } from "./seed.js";
-import { authRouter } from "./routes/auth.js";
 import { productsRouter } from "./routes/products.js";
 import { ordersRouter } from "./routes/orders.js";
 import { paymentsRouter, stripeWebhookHandler } from "./routes/payments.js";
@@ -44,7 +44,6 @@ app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
 });
 
-app.use("/api/auth", authRouter);
 app.use("/api/products", productsRouter);
 app.use("/api/orders", ordersRouter);
 app.use("/api/payments", paymentsRouter);
@@ -56,6 +55,9 @@ app.use((err, _req, res) => {
 });
 
 async function main() {
+  // Initialize PostgreSQL tables
+  await initDb();
+  // Seed products if needed
   await seedIfNeeded();
 
   return new Promise((resolve) => {

@@ -1,6 +1,6 @@
 import express from "express";
 import { z } from "zod";
-import { db, nowIso } from "../db.js";
+import { pool, nowIso } from "../db.js";
 
 export const productsRouter = express.Router();
 
@@ -24,33 +24,43 @@ function mapProduct(row) {
   };
 }
 
-productsRouter.get("/", (req, res) => {
-  const type = String(req.query.type || "all");
-  const q = String(req.query.q || "").trim().toLowerCase();
+productsRouter.get("/", async (req, res) => {
+  try {
+    const type = String(req.query.type || "all");
+    const q = String(req.query.q || "").trim().toLowerCase();
 
-  let rows;
-  if (type !== "all") {
-    rows = db.prepare("SELECT * FROM products WHERE type = ? ORDER BY id DESC").all(type);
-  } else {
-    rows = db.prepare("SELECT * FROM products ORDER BY id DESC").all();
+    let result;
+    if (type !== "all") {
+      result = await pool.query("SELECT * FROM products WHERE type = $1 ORDER BY id DESC", [type]);
+    } else {
+      result = await pool.query("SELECT * FROM products ORDER BY id DESC");
+    }
+
+    let list = result.rows.map(mapProduct);
+    if (q) {
+      list = list.filter((p) => {
+        const hay = `${p.title || ""} ${p.brand || ""} ${p.model || ""} ${p.type || ""}`.toLowerCase();
+        return hay.includes(q);
+      });
+    }
+
+    return res.json(list);
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "Database error" });
   }
-
-  let list = rows.map(mapProduct);
-  if (q) {
-    list = list.filter((p) => {
-      const hay = `${p.title || ""} ${p.brand || ""} ${p.model || ""} ${p.type || ""}`.toLowerCase();
-      return hay.includes(q);
-    });
-  }
-
-  return res.json(list);
 });
 
-productsRouter.get("/:key", (req, res) => {
-  const key = String(req.params.key);
-  const row = db.prepare("SELECT * FROM products WHERE key = ?").get(key);
-  if (!row) return res.status(404).json({ error: "Not found" });
-  return res.json(mapProduct(row));
+productsRouter.get("/:key", async (req, res) => {
+  try {
+    const key = String(req.params.key);
+    const result = await pool.query("SELECT * FROM products WHERE key = $1", [key]);
+    if (result.rows.length === 0) return res.status(404).json({ error: "Not found" });
+    return res.json(mapProduct(result.rows[0]));
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "Database error" });
+  }
 });
 
 const productSchema = z.object({
@@ -64,7 +74,7 @@ const productSchema = z.object({
   price: z.number().nonnegative(),
 });
 
-productsRouter.post("/", (req, res) => {
+productsRouter.post("/", async (req, res) => {
   const parsed = productSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Invalid input" });
 
@@ -73,67 +83,57 @@ productsRouter.post("/", (req, res) => {
   const cents = Math.round(parsed.data.price * 100);
 
   try {
-    db.prepare(
+    await pool.query(
       `INSERT INTO products (key, type, title, brand, model, description, image, price_cents, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(
-      key,
-      parsed.data.type,
-      parsed.data.title,
-      parsed.data.brand || null,
-      parsed.data.model || null,
-      parsed.data.description || null,
-      parsed.data.image || null,
-      cents,
-      ts,
-      ts
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [key, parsed.data.type, parsed.data.title, parsed.data.brand || null, parsed.data.model || null, parsed.data.description || null, parsed.data.image || null, cents, ts, ts]
     );
-    const row = db.prepare("SELECT * FROM products WHERE key = ?").get(key);
-    return res.json(mapProduct(row));
+    const result = await pool.query("SELECT * FROM products WHERE key = $1", [key]);
+    return res.json(mapProduct(result.rows[0]));
   } catch {
     return res.status(409).json({ error: "Product key already exists" });
   }
 });
 
-productsRouter.put("/:key", (req, res) => {
-  const key = String(req.params.key);
-  const parsed = productSchema.partial({ id: true, type: true }).safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: "Invalid input" });
+productsRouter.put("/:key", async (req, res) => {
+  try {
+    const key = String(req.params.key);
+    const parsed = productSchema.partial({ id: true, type: true }).safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: "Invalid input" });
 
-  const existing = db.prepare("SELECT * FROM products WHERE key = ?").get(key);
-  if (!existing) return res.status(404).json({ error: "Not found" });
+    const existing = await pool.query("SELECT * FROM products WHERE key = $1", [key]);
+    if (existing.rows.length === 0) return res.status(404).json({ error: "Not found" });
 
-  const next = {
-    title: parsed.data.title ?? existing.title,
-    brand: parsed.data.brand ?? existing.brand,
-    model: parsed.data.model ?? existing.model,
-    description: parsed.data.description ?? existing.description,
-    image: parsed.data.image ?? existing.image,
-    price_cents:
-      parsed.data.price !== undefined ? Math.round(Number(parsed.data.price) * 100) : existing.price_cents,
-  };
+    const row = existing.rows[0];
+    const next = {
+      title: parsed.data.title ?? row.title,
+      brand: parsed.data.brand ?? row.brand,
+      model: parsed.data.model ?? row.model,
+      description: parsed.data.description ?? row.description,
+      image: parsed.data.image ?? row.image,
+      price_cents: parsed.data.price !== undefined ? Math.round(Number(parsed.data.price) * 100) : row.price_cents,
+    };
 
-  db.prepare(
-    `UPDATE products
-     SET title = ?, brand = ?, model = ?, description = ?, image = ?, price_cents = ?, updated_at = ?
-     WHERE key = ?`
-  ).run(
-    next.title,
-    next.brand,
-    next.model,
-    next.description,
-    next.image,
-    next.price_cents,
-    nowIso(),
-    key
-  );
+    await pool.query(
+      `UPDATE products SET title = $1, brand = $2, model = $3, description = $4, image = $5, price_cents = $6, updated_at = $7 WHERE key = $8`,
+      [next.title, next.brand, next.model, next.description, next.image, next.price_cents, nowIso(), key]
+    );
 
-  const row = db.prepare("SELECT * FROM products WHERE key = ?").get(key);
-  return res.json(mapProduct(row));
+    const result = await pool.query("SELECT * FROM products WHERE key = $1", [key]);
+    return res.json(mapProduct(result.rows[0]));
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "Database error" });
+  }
 });
 
-productsRouter.delete("/:key", (req, res) => {
-  const key = String(req.params.key);
-  db.prepare("DELETE FROM products WHERE key = ?").run(key);
-  return res.json({ ok: true });
+productsRouter.delete("/:key", async (req, res) => {
+  try {
+    const key = String(req.params.key);
+    await pool.query("DELETE FROM products WHERE key = $1", [key]);
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "Database error" });
+  }
 });
