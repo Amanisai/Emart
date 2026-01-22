@@ -22,6 +22,8 @@ app.use(
         if (isLocalhost && isDevPort) return cb(null, true);
         // Allow Netlify domains
         if (url.hostname.endsWith(".netlify.app")) return cb(null, true);
+        // Allow Vercel domains
+        if (url.hostname.endsWith(".vercel.app")) return cb(null, true);
       } catch {
         // ignore
       }
