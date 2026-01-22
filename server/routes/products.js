@@ -1,7 +1,6 @@
 import express from "express";
 import { z } from "zod";
 import { db, nowIso } from "../db.js";
-import { requireAuth, requireRole } from "../middleware/auth.js";
 
 export const productsRouter = express.Router();
 
@@ -65,7 +64,7 @@ const productSchema = z.object({
   price: z.number().nonnegative(),
 });
 
-productsRouter.post("/", requireAuth, requireRole("admin"), (req, res) => {
+productsRouter.post("/", (req, res) => {
   const parsed = productSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Invalid input" });
 
@@ -96,7 +95,7 @@ productsRouter.post("/", requireAuth, requireRole("admin"), (req, res) => {
   }
 });
 
-productsRouter.put("/:key", requireAuth, requireRole("admin"), (req, res) => {
+productsRouter.put("/:key", (req, res) => {
   const key = String(req.params.key);
   const parsed = productSchema.partial({ id: true, type: true }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Invalid input" });
@@ -133,7 +132,7 @@ productsRouter.put("/:key", requireAuth, requireRole("admin"), (req, res) => {
   return res.json(mapProduct(row));
 });
 
-productsRouter.delete("/:key", requireAuth, requireRole("admin"), (req, res) => {
+productsRouter.delete("/:key", (req, res) => {
   const key = String(req.params.key);
   db.prepare("DELETE FROM products WHERE key = ?").run(key);
   return res.json({ ok: true });

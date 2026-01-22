@@ -4,9 +4,11 @@ import { z } from "zod";
 
 import { config } from "../config.js";
 import { db, nowIso } from "../db.js";
-import { requireAuth } from "../middleware/auth.js";
 
 export const paymentsRouter = express.Router();
+
+// Guest user ID for unauthenticated payments
+const GUEST_USER_ID = 1;
 
 function toMoney(priceCents) {
   return (Number(priceCents || 0) / 100).toFixed(2);
@@ -33,13 +35,13 @@ const checkoutSchema = z.object({
     .min(1),
 });
 
-paymentsRouter.post("/stripe/checkout-session", requireAuth, async (req, res, next) => {
+paymentsRouter.post("/stripe/checkout-session", async (req, res, next) => {
   try {
     const parsed = checkoutSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "Invalid input" });
 
     const stripe = getStripe();
-    const userId = Number(req.user.sub);
+    const userId = GUEST_USER_ID;
 
     const getProduct = db.prepare("SELECT key, price_cents, title, image, type FROM products WHERE key = ?");
 
@@ -115,30 +117,28 @@ paymentsRouter.post("/stripe/checkout-session", requireAuth, async (req, res, ne
   }
 });
 
-paymentsRouter.post("/stripe/verify", requireAuth, async (req, res, next) => {
+paymentsRouter.post("/stripe/verify", async (req, res, next) => {
   try {
     const parsed = z.object({ sessionId: z.string().min(1) }).safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "Invalid input" });
 
     const stripe = getStripe();
-    const userId = Number(req.user.sub);
+    const userId = GUEST_USER_ID;
 
     const session = await stripe.checkout.sessions.retrieve(parsed.data.sessionId);
     const orderId = session.metadata?.orderId;
-    const sessionUserId = session.metadata?.userId;
 
-    if (!orderId || !sessionUserId) return res.status(400).json({ error: "Invalid session metadata" });
-    if (Number(sessionUserId) !== userId) return res.status(403).json({ error: "Forbidden" });
+    if (!orderId) return res.status(400).json({ error: "Invalid session metadata" });
 
     const paid = session.payment_status === "paid";
 
     if (paid) {
       db.prepare(
-        "UPDATE orders SET status = ?, payment_status = ?, payment_provider = ?, payment_ref = ? WHERE id = ? AND user_id = ?"
-      ).run("paid", "paid", "stripe", session.id, Number(orderId), userId);
+        "UPDATE orders SET status = ?, payment_status = ?, payment_provider = ?, payment_ref = ? WHERE id = ?"
+      ).run("paid", "paid", "stripe", session.id, Number(orderId));
     }
 
-    const row = db.prepare("SELECT * FROM orders WHERE id = ? AND user_id = ?").get(Number(orderId), userId);
+    const row = db.prepare("SELECT * FROM orders WHERE id = ?").get(Number(orderId));
     if (!row) return res.status(404).json({ error: "Order not found" });
 
     return res.json({

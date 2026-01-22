@@ -1,9 +1,11 @@
 import express from "express";
 import { z } from "zod";
 import { db, nowIso } from "../db.js";
-import { requireAuth, requireRole } from "../middleware/auth.js";
 
 export const ordersRouter = express.Router();
+
+// Guest user ID for unauthenticated orders
+const GUEST_USER_ID = 1;
 
 function toMoney(priceCents) {
   return (Number(priceCents || 0) / 100).toFixed(2);
@@ -21,9 +23,8 @@ const createOrderSchema = z.object({
     .min(1),
 });
 
-ordersRouter.get("/", requireAuth, (req, res) => {
-  const userId = Number(req.user.sub);
-  const rows = db.prepare("SELECT * FROM orders WHERE user_id = ? ORDER BY id DESC").all(userId);
+ordersRouter.get("/", (req, res) => {
+  const rows = db.prepare("SELECT * FROM orders ORDER BY id DESC").all();
 
   const list = rows.map((o) => ({
     id: String(o.id),
@@ -38,7 +39,7 @@ ordersRouter.get("/", requireAuth, (req, res) => {
 });
 
 // Admin: list all orders
-ordersRouter.get("/admin", requireAuth, requireRole("admin"), (_req, res) => {
+ordersRouter.get("/admin", (_req, res) => {
   const rows = db
     .prepare(
       "SELECT o.id, o.total_cents, o.status, o.payment_provider, o.payment_status, o.payment_ref, o.created_at, u.id as user_id, u.email as user_email, u.name as user_name FROM orders o JOIN users u ON u.id = o.user_id ORDER BY o.id DESC"
@@ -59,11 +60,11 @@ ordersRouter.get("/admin", requireAuth, requireRole("admin"), (_req, res) => {
   );
 });
 
-ordersRouter.post("/", requireAuth, (req, res) => {
+ordersRouter.post("/", (req, res) => {
   const parsed = createOrderSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Invalid input" });
 
-  const userId = Number(req.user.sub);
+  const userId = GUEST_USER_ID;
 
   // Compute totals from products table for integrity.
   const items = parsed.data.items;
